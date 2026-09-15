@@ -35,6 +35,42 @@ impl Config {
         self
     }
 
+    /// Parse the text of a `KEY=VALUE` env file carrying `EXVISTA_DEPLOY_URL`,
+    /// `EXVISTA_DEPLOY_KEY` and optionally `EXVISTA_DEPLOY_REPORT_URL`
+    /// (`export` prefixes, quotes and `#` comments tolerated). `None` unless
+    /// both required keys are present. Pure, so a `no_std` device can parse a
+    /// config blob it read from wherever it keeps one.
+    pub fn parse_env_text(text: &str) -> Option<Self> {
+        let mut pull_url = None;
+        let mut key = None;
+        let mut report_url = None;
+        for line in text.lines() {
+            let line = line.trim();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let v = v.trim().trim_matches('"').trim_matches('\'');
+            if v.is_empty() {
+                continue;
+            }
+            match k.trim() {
+                "EXVISTA_DEPLOY_URL" => pull_url = Some(String::from(v)),
+                "EXVISTA_DEPLOY_KEY" => key = Some(String::from(v)),
+                "EXVISTA_DEPLOY_REPORT_URL" => report_url = Some(String::from(v)),
+                _ => {}
+            }
+        }
+        Some(Self {
+            pull_url: pull_url?,
+            report_url,
+            key: key?,
+        })
+    }
+
     pub(crate) fn bearer(&self) -> String {
         let mut s = String::with_capacity(7 + self.key.len());
         s.push_str("Bearer ");

@@ -12,8 +12,13 @@ jobs:
           components: rustfmt, clippy
           targets: thumbv7em-none-eabihf
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --no-default-features --lib -- -D warnings
+      # std batteries + core, against a local HTTP mock and temp directories.
       - run: cargo test
-      # The library must keep building without std: a Cortex-M4F target has no
-      # std at all, so anything that leaks a std dependency fails here.
-      - run: cargo build --lib --target thumbv7em-none-eabihf
+      # The core alone must pass without the std feature.
+      - run: cargo test --no-default-features
+      # And build for a target that has no std at all: anything that leaks a std
+      # dependency into the core fails here.
+      - run: cargo build --lib --no-default-features --target thumbv7em-none-eabihf
+      - run: cargo run --example embedded_traits

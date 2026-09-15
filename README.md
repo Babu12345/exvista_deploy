@@ -1,9 +1,9 @@
 # exvista_deploy
 
 The device side of an [ExVista](https://www.exvistatechnologies.com) model
-deployment, as a `no_std + alloc` Rust crate. It knows the contract — pull,
-compare, download, verify, commit, report — and nothing about your hardware.
-You give it two things: a way to make HTTPS requests and a place to put files.
+deployment: pull the model this device is cleared to run, verify it, stage it,
+report it. Batteries included on a std host; a `no_std` core with two small
+traits everywhere else.
 
 ```
                         ExVista                              your device
@@ -16,26 +16,55 @@ A device physically cannot pull a blocked model. What this crate adds is the
 part after the pull: the bytes are hashed as they stream, unzipped on the fly,
 and only become the current checkpoint once the hash matched.
 
-## What you implement
+## On a std host: plug it in
 
-Two traits. Both are small, both are blocking, and neither assumes an OS.
-
-**`Transport`** — your HTTP client.
-
-```rust
-pub trait Transport {
-    type Error;
-    /// A small request/response (the pull, the report). Return EVERY HTTP status
-    /// as Ok(Response); the crate decides what 401 / 404 / 409 / 5xx mean.
-    fn exchange(&mut self, req: &Request) -> Result<Response, Self::Error>;
-    /// GET a presigned URL and stream the body to `sink` in chunks. Artifacts can
-    /// be gigabytes; never buffer the whole thing.
-    fn download(&mut self, url: &str, sink: &mut dyn FnMut(&[u8]) -> Result<(), ()>)
-        -> Result<(), DownloadError<Self::Error>>;
-}
+```toml
+[dependencies]
+exvista_deploy = "0.2"
 ```
 
-**`Storage`** — where the checkpoint lives, driven like a transaction.
+```rust
+use exvista_deploy::{host::{DirStorage, UreqTransport}, Config, Device, Report, Sync};
+
+let config = Config::discover("/etc/exvista/device.env").expect("not enrolled");
+let mut device = Device::new(config, UreqTransport::default(), DirStorage::new("/opt/model"));
+
+let current = match device.sync()? {
+    Sync::Current(c) | Sync::Staged(c) => c,   // a verified checkpoint is at /opt/model
+    Sync::Nothing => refuse_to_start(),        // the gate served nothing
+    Sync::NoArtifact(served) => refuse_to_start(),
+};
+// … load the model …
+device.report(&Report::Loaded, Some(&current))?;
+```
+
+That is the whole integration. `host::UreqTransport` is an HTTP client on
+`ureq`, `host::DirStorage` stages into a sibling directory and renames it into
+place atomically (the previous checkpoint survives until the rename succeeded),
+and `Config::discover` reads `EXVISTA_DEPLOY_URL` / `EXVISTA_DEPLOY_KEY` /
+`EXVISTA_DEPLOY_REPORT_URL` from the environment or a `KEY=VALUE` file.
+[`examples/std_device.rs`](examples/std_device.rs) is a runnable version with a
+fail-closed policy around it.
+
+Swap either battery for your own by implementing the trait — a different HTTP
+client, an object store, an A/B partition scheme — without touching the rest.
+
+## Everywhere else: `no_std`, bring your own
+
+```toml
+[dependencies]
+exvista_deploy = { version = "0.2", default-features = false }
+```
+
+The core is `no_std + alloc`: JSON, SHA-256, a streaming unzip, and the device
+algorithm, with no network or filesystem code at all. You implement two traits
+on your platform's primitives:
+
+**`Transport`** — one small request/response (the pull and the report; return
+*every* HTTP status as `Ok`, the crate decides what it means) and one streamed
+`GET` of a presigned URL, fed to a sink in chunks.
+
+**`Storage`** — a staging area driven like a transaction:
 
 ```text
 current()     what is staged now, if anything intact
@@ -47,75 +76,49 @@ abort()       drop the staging area; whatever was current stays current
 record(&cur)  same bytes redeployed under a new id: update the markers only
 ```
 
-On Linux that is a sibling directory renamed into place plus two marker files.
-On a microcontroller it might be two flash slots and a boot record. See
-[`examples/std_device.rs`](examples/std_device.rs) for a complete host
-implementation on `ureq` + `std::fs` — about 150 lines, and the shape most
-Linux appliances will want.
+[`examples/embedded_traits.rs`](examples/embedded_traits.rs) shows both impls
+written against only `core` + `alloc`, with every platform hook marked; it runs
+on a host against in-memory fakes so the shape can be stepped through. On a
+microcontroller the transport is your TLS stack (`reqwless`, a vendor SDK) and
+the storage is two flash slots and a boot record.
 
-## What the crate does with them
+CI builds the core for `thumbv7em-none-eabihf` on every push, so nothing with a
+std dependency can sneak in.
 
-```rust
-let mut device = Device::new(config, my_transport, my_storage);
+## What the crate decides, on every target
 
-match device.sync()? {
-    Sync::Nothing            => refuse_to_start(),         // the gate served nothing
-    Sync::Current(c)         => load_and_run(&c),          // same bytes already staged, no download
-    Sync::Staged(c)          => load_and_run(&c),          // downloaded, verified, committed
-    Sync::NoArtifact(served) => decide_for_yourself(&served),
-}
-device.report(&Report::Loaded, Some(&current))?;           // provenance: this model is serving
-```
+- `Error` is an enum you act on without parsing strings: `Unauthorized`
+  (key revoked), `NotProvisioned`, `Server`, `Transport`, `Integrity`,
+  `Archive`, `NoArtifact`, … `Error::is_transient()` says what is worth
+  retrying (no network yet, a 5xx) versus what is a decision.
+- `files[].sha256` is checked over the raw download, incrementally; on a
+  mismatch the staging area is aborted and nothing you had is touched.
+- Zip entries are streamed, never buffered: STORED (what ExVista serves, zip64
+  for multi-gigabyte weights) and DEFLATE. Entries that would escape the
+  directory are refused. An archive with no files is refused — a marker must
+  never vouch for an empty directory.
+- The marker file names (`.exvista-fingerprint`, `.exvista-deployment`) are the
+  ones every ExVista client uses, so a directory staged by the Python reference
+  client reads as current here and vice versa.
+- Known-value strings are enums (`Verdict`, `GateStatus`, `Report`), each with
+  an `Other` escape hatch so a new server-side value never breaks a device.
 
-`Error` is an enum you can act on without parsing strings, and
-`Error::is_transient()` tells a policy what is worth retrying (no network yet,
-a 5xx) versus what is a decision (key revoked, integrity failure, refused).
-
-The crate never starts anything and never waits. **Policy is yours**: fail
-closed or open, how long to retry a transient error after a cold boot, whether
-`NoArtifact` means "resolve the model yourself" or "refuse". The reference
-appliance policy — fail closed, retry transient failures for two minutes,
-report `loaded` only once the server answers `/health` — is a few dozen lines
-on top of `Device`.
-
-## Verification, precisely
-
-- `files[].sha256` is checked over the raw download, incrementally, and the
-  staging area is aborted on mismatch. Nothing you had is touched.
-- Zip entries are streamed, not buffered: STORED (what ExVista serves, zip64
-  for multi-gigabyte weights) and DEFLATE (uploads). Entry names that would
-  escape the directory are refused. An archive with no files is refused — a
-  fingerprint marker must never vouch for an empty directory.
-- The marker file names (`.exvista-fingerprint`, `.exvista-deployment`) are
-  the ones every ExVista client uses, so a directory staged by the Python
-  reference client reads as current to a Rust device and vice versa.
-
-## `no_std`
-
-The library has no `std` dependency at all: `serde_json` with `alloc`, `sha2`,
-and `miniz_oxide` for inflate. CI builds it for `thumbv7em-none-eabihf` on
-every push. Two things an embedded integrator owns:
-
-1. **TLS and the clock.** ExVista's endpoints are HTTPS. A device that boots
-   without a synced clock will fail certificate validation ("not yet valid");
-   the crate reports that as a transient `Transport` error so your policy can
-   wait for time sync and retry.
-2. **Size.** Today's artifacts are checkpoint zips of hundreds of megabytes to
-   gigabytes, streamed straight into storage. The crate keeps only one chunk
-   plus a 32 KiB inflate buffer in memory, but the destination has to fit the
-   model.
+**Policy is yours.** `Device::sync` never starts anything and never waits. Fail
+closed or open, how long to retry after a cold boot, what `NoArtifact` means:
+a few dozen lines on top, and they belong to the integrator. Two things every
+integrator must handle: TLS needs a correct clock (a device that boots at 1970
+must sync time before its first pull — the crate reports the failure as
+transient), and the device key is the only secret, so keep it out of logs.
 
 ## Testing
 
 ```bash
-cargo test                                      # contract + streaming zip, in-memory doubles
-cargo build --lib --target thumbv7em-none-eabihf # the no_std check (rustup target add first)
-cargo run --example std_device -- ./model        # a real pull against your device key
+cargo test                                          # core + std batteries (local HTTP mock, temp dirs)
+cargo test --no-default-features                    # the core alone
+cargo build --lib --no-default-features --target thumbv7em-none-eabihf   # the no_std check
+cargo run --example embedded_traits                 # the bring-your-own shape, in memory
+cargo run --example std_device -- ./model           # a real pull against your device key
 ```
-
-The in-memory `Transport` and `Storage` in [`tests/device.rs`](tests/device.rs)
-are the smallest correct implementations of the traits — a good starting point
-for a port.
 
 ## License
 

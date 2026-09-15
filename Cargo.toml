@@ -1,32 +1,39 @@
 [package]
 name = "exvista_deploy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.81"
-description = "Device-side client for ExVista model deployments, no_std + alloc: pull the model your device is cleared to run, verify it, stage it, report it. You supply the transport and the storage."
+description = "Device-side client for ExVista model deployments: pull the model your device is cleared to run, verify it, stage it, report it. Batteries included on std; no_std core with two traits to implement everywhere else."
 license = "MIT"
 repository = "https://github.com/Babu12345/exvista_deploy"
 readme = "README.md"
 keywords = ["exvista", "edge", "embedded", "deployment", "no-std"]
 categories = ["api-bindings", "embedded", "no-std"]
 
+[features]
+default = ["std"]
+# Batteries: `host::UreqTransport`, `host::DirStorage`, `Config::from_env` /
+# `from_env_file`. Turn it off (`default-features = false`) for the pure core,
+# and implement `Transport` + `Storage` on your own platform.
+std = ["dep:ureq", "serde/std", "serde_json/std", "sha2/std", "miniz_oxide/std"]
+
 [dependencies]
-# Everything here builds without std. There is deliberately NO HTTP client and
-# NO filesystem code in this crate: you implement `Transport` and `Storage`
-# for your platform (see examples/std_device.rs for a std host).
+# The core builds without std: types, JSON, SHA-256, streaming inflate.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false }
-# Streaming inflate for DEFLATE-compressed artifact entries (uploads); ExVista's
-# own artifacts are STORED and need no decompression at all.
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+# std only: the ready-made HTTP transport.
+ureq = { version = "2", optional = true }
 
 [dev-dependencies]
-# Tests build real zips to feed the streaming extractor; the std example uses
-# ureq + the filesystem. Neither is a dependency of the library.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-ureq = { version = "2", features = ["json"] }
+mockito = "1"
 tempfile = "3"
 
 [[example]]
 name = "std_device"
+required-features = ["std"]
+
+[[example]]
+name = "embedded_traits"
