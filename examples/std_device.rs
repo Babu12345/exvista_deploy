@@ -16,6 +16,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use exvista_deploy::Report;
+
 use exvista_deploy::{
     Config, Current, Device, DownloadError, Error, Method, Request, Response, Storage, Sync,
     Transport, DEPLOYMENT_MARKER, FINGERPRINT_MARKER,
@@ -273,7 +275,7 @@ fn main() {
 
     // Here is where you would load the model. Then:
     if device.config().report_url.is_some() {
-        match device.report("loaded", Some(&current)) {
+        match device.report(&Report::Loaded, Some(&current)) {
             Ok(()) => println!("reported loaded"),
             Err(e) => eprintln!("report failed: {e}"),
         }

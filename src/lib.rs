@@ -30,7 +30,7 @@
 //!     Sync::Staged(c)          => start(&c),                  // downloaded + verified + committed
 //!     Sync::NoArtifact(served) => resolve_yourself(&served),  // deployment carries no files
 //! }
-//! device.report("loaded", Some(&current))?;
+//! device.report(&Report::Loaded, Some(&current))?;
 //! ```
 //!
 //! Two things every integrator must get right and this crate cannot do for them:
@@ -52,7 +52,8 @@ mod verify;
 mod zipstream;
 
 pub use contract::{
-    parse_pull_response, Artifact, Config, Current, Method, Request, Response, Served,
+    parse_pull_response, Artifact, Config, Current, GateStatus, Method, Report, Request, Response,
+    Served, Verdict,
 };
 pub use device::{Device, Sync};
 pub use error::Error;

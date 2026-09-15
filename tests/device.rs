@@ -10,6 +10,8 @@ use exvista_deploy::{
     Storage, Sync, Transport, DEPLOYMENT_MARKER, FINGERPRINT_MARKER,
 };
 
+use exvista_deploy::{GateStatus, Report, Verdict};
+
 const KEY: &str = "exd_dev1.secret";
 const FP: &str = "aeb82e9d659c311de12fc23ed2d9d15cf1688354f6ed8f8d28a483a630765054";
 
@@ -232,7 +234,8 @@ fn pull_parses_the_served_deployment_and_falls_back_to_the_attestation() {
     let mut t = MemTransport::default();
     // No top-level fingerprint/deploymentId: the attestation carries them.
     let body = serde_json::to_vec(&serde_json::json!({
-        "attestation": { "deploymentId": "dep-9", "fingerprintCrypto": FP, "modelName": "m" },
+        "attestation": { "deploymentId": "dep-9", "fingerprintCrypto": FP, "modelName": "m",
+                         "verdict": "clean", "gateStatus": "OVERRIDDEN" },
         "files": []
     }))
     .unwrap();
@@ -241,7 +244,15 @@ fn pull_parses_the_served_deployment_and_falls_back_to_the_attestation() {
     assert_eq!(served.deployment_id, "dep-9");
     assert_eq!(served.fingerprint, FP);
     assert_eq!(served.model_name, "m");
+    assert_eq!(served.verdict, Some(Verdict::Clean), "case-insensitive");
+    assert_eq!(served.gate_status, Some(GateStatus::Overridden));
     assert!(served.files.is_empty());
+    // A value this crate has never heard of must not break parsing.
+    assert_eq!(
+        Verdict::parse("QUARANTINED"),
+        Verdict::Other("QUARANTINED".into())
+    );
+    assert_eq!(Verdict::Other("QUARANTINED".into()).as_str(), "QUARANTINED");
 }
 
 // ── sync / stage ───────────────────────────────────────────────────────────
@@ -499,7 +510,7 @@ fn report_posts_status_fingerprint_and_deployment_with_the_key() {
         fingerprint: FP.into(),
         deployment_id: "dep-1".into(),
     };
-    d.report("loaded", Some(&current)).unwrap();
+    d.report(&Report::Loaded, Some(&current)).unwrap();
     let req = &d.transport_mut().requests[0];
     assert_eq!(req.url, "https://report.example/");
     assert!(req
@@ -507,6 +518,12 @@ fn report_posts_status_fingerprint_and_deployment_with_the_key() {
         .contains(&("Authorization", format!("Bearer {KEY}"))));
     let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
     assert_eq!(body["status"], "loaded");
+    // The wire strings ExVista classifies: "loaded" → LOADED, "error: …" → ERROR.
+    assert_eq!(
+        Report::Error("cuda init failed".into()).status(),
+        "error: cuda init failed"
+    );
+    assert_eq!(Report::Heartbeat.status(), "heartbeat");
     assert_eq!(body["fingerprint"], FP);
     assert_eq!(body["deploymentId"], "dep-1");
 }
@@ -518,7 +535,10 @@ fn report_without_a_report_url_is_a_config_error() {
         MemTransport::default(),
         MemStorage::default(),
     );
-    assert!(matches!(d.report("loaded", None), Err(Error::Config(_))));
+    assert!(matches!(
+        d.report(&Report::Loaded, None),
+        Err(Error::Config(_))
+    ));
 }
 
 #[test]
@@ -526,7 +546,7 @@ fn report_rejections_are_classified_like_pulls() {
     let mut t = MemTransport::default();
     t.replies.push_back((401, b"invalid device key".to_vec()));
     let err = device(t, MemStorage::default())
-        .report("loaded", None)
+        .report(&Report::Error("cuda init failed".into()), None)
         .unwrap_err();
     assert!(matches!(err, Error::Unauthorized { status: 401, .. }));
 }

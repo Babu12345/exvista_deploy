@@ -64,7 +64,7 @@ match device.sync()? {
     Sync::Staged(c)          => load_and_run(&c),          // downloaded, verified, committed
     Sync::NoArtifact(served) => decide_for_yourself(&served),
 }
-device.report("loaded", Some(&current))?;                  // provenance: this model is serving
+device.report(&Report::Loaded, Some(&current))?;           // provenance: this model is serving
 ```
 
 `Error` is an enum you can act on without parsing strings, and

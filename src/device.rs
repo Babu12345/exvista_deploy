@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 
 use crate::contract::{
-    parse_pull_response, pull_request, report_request, Artifact, Config, Current, Served,
+    parse_pull_response, pull_request, report_request, Artifact, Config, Current, Report, Served,
 };
 use crate::error::Error;
 use crate::traits::{DownloadError, Storage, Transport};
@@ -219,17 +219,17 @@ impl<T: Transport, S: Storage> Device<T, S> {
         Ok(())
     }
 
-    /// Step 5: tell ExVista what this device did. `status` is free text that
-    /// ExVista classifies (`"loaded"` → LOADED, anything with `error`/`fail` →
-    /// ERROR, else a heartbeat). Pass the [`Current`] you are running so the
-    /// provenance row names the model.
-    pub fn report(&mut self, status: &str, current: Option<&Current>) -> DevResult<T, S, ()> {
+    /// Step 5: tell ExVista what this device did — [`Report::Loaded`] once the
+    /// model is serving, [`Report::Heartbeat`] while it keeps serving,
+    /// [`Report::Error`] when it could not. Pass the [`Current`] you are running
+    /// so the provenance row names the model.
+    pub fn report(&mut self, report: &Report, current: Option<&Current>) -> DevResult<T, S, ()> {
         let url = self
             .config
             .report_url
             .clone()
             .ok_or(Error::Config("report_url is not set"))?;
-        let req = report_request(&self.config, &url, status, current);
+        let req = report_request(&self.config, &url, report, current);
         let resp = self.transport.exchange(&req).map_err(Error::Transport)?;
         match resp.status {
             200..=299 => Ok(()),

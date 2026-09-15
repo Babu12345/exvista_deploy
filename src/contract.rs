@@ -110,6 +110,132 @@ pub struct Artifact {
     pub url: String,
 }
 
+/// The scan verdict ExVista attached to a deployment. `Other` carries a value
+/// this crate does not know yet, so a new server-side verdict never breaks a
+/// device's parsing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// No backdoor found. The only verdict the gate serves unaided.
+    Clean,
+    /// A backdoor was found; the gate blocks it.
+    Backdoored,
+    /// The scan could not decide; the gate blocks it.
+    Inconclusive,
+    /// The scan has not finished.
+    Pending,
+    /// A value this crate does not know.
+    Other(String),
+}
+
+impl Verdict {
+    /// From the wire string (case-insensitive).
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_uppercase().as_str() {
+            "CLEAN" => Verdict::Clean,
+            "BACKDOORED" => Verdict::Backdoored,
+            "INCONCLUSIVE" => Verdict::Inconclusive,
+            "PENDING" => Verdict::Pending,
+            _ => Verdict::Other(s.into()),
+        }
+    }
+
+    /// The wire string.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Verdict::Clean => "CLEAN",
+            Verdict::Backdoored => "BACKDOORED",
+            Verdict::Inconclusive => "INCONCLUSIVE",
+            Verdict::Pending => "PENDING",
+            Verdict::Other(s) => s,
+        }
+    }
+}
+
+impl core::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Where the deployment stands with the gate. A device only ever sees `Passed`
+/// or `Overridden` — anything else is never served — but the value is carried
+/// for the log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GateStatus {
+    /// The gate has not run.
+    Pending,
+    /// CLEAN verdict; servable.
+    Passed,
+    /// Non-CLEAN verdict; never served.
+    Blocked,
+    /// An operator explicitly overrode a block for this one deployment; servable
+    /// and audited.
+    Overridden,
+    /// A value this crate does not know.
+    Other(String),
+}
+
+impl GateStatus {
+    /// From the wire string (case-insensitive).
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_uppercase().as_str() {
+            "PENDING" => GateStatus::Pending,
+            "PASSED" => GateStatus::Passed,
+            "BLOCKED" => GateStatus::Blocked,
+            "OVERRIDDEN" => GateStatus::Overridden,
+            _ => GateStatus::Other(s.into()),
+        }
+    }
+
+    /// The wire string.
+    pub fn as_str(&self) -> &str {
+        match self {
+            GateStatus::Pending => "PENDING",
+            GateStatus::Passed => "PASSED",
+            GateStatus::Blocked => "BLOCKED",
+            GateStatus::Overridden => "OVERRIDDEN",
+            GateStatus::Other(s) => s,
+        }
+    }
+}
+
+impl core::fmt::Display for GateStatus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What a device tells ExVista. ExVista classifies the status text into a
+/// provenance event kind; these variants map onto that classification so a
+/// caller cannot misspell its way into the wrong kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Report {
+    /// The model is loaded and serving → a LOADED event.
+    Loaded,
+    /// Still here, still running what was reported → a HEARTBEAT event.
+    Heartbeat,
+    /// Something went wrong on the device → an ERROR event, with your message.
+    Error(String),
+    /// Any other status text, classified by ExVista as it sees fit.
+    Custom(String),
+}
+
+impl Report {
+    /// The `status` string sent on the wire.
+    pub fn status(&self) -> String {
+        match self {
+            Report::Loaded => String::from("loaded"),
+            Report::Heartbeat => String::from("heartbeat"),
+            Report::Error(msg) => {
+                let mut s = String::from("error: ");
+                s.push_str(msg);
+                s
+            }
+            Report::Custom(s) => s.clone(),
+        }
+    }
+}
+
 /// A successful pull: the deployment this device is cleared to run.
 #[derive(Clone, Debug)]
 pub struct Served {
@@ -117,10 +243,10 @@ pub struct Served {
     pub deployment_id: String,
     /// Model name as deployed.
     pub model_name: String,
-    /// Scan verdict (`CLEAN` for anything the gate serves).
-    pub verdict: Option<String>,
-    /// Gate status (`PASSED`, or an explicit override).
-    pub gate_status: Option<String>,
+    /// Scan verdict (`Clean` for anything the gate serves unaided).
+    pub verdict: Option<Verdict>,
+    /// Gate status (`Passed`, or an explicit `Overridden`).
+    pub gate_status: Option<GateStatus>,
     /// The scan job that produced the verdict.
     pub scan_job_id: Option<String>,
     /// `fingerprint.crypto`. Empty only if ExVista sent none.
@@ -183,8 +309,11 @@ pub fn parse_pull_response(body: &[u8]) -> Result<Served, String> {
             .model_name
             .or_else(|| attest_str(&attestation, "modelName"))
             .unwrap_or_default(),
-        verdict: raw.verdict.or_else(|| attest_str(&attestation, "verdict")),
-        gate_status: attest_str(&attestation, "gateStatus"),
+        verdict: raw
+            .verdict
+            .or_else(|| attest_str(&attestation, "verdict"))
+            .map(|v| Verdict::parse(&v)),
+        gate_status: attest_str(&attestation, "gateStatus").map(|g| GateStatus::parse(&g)),
         scan_job_id: attest_str(&attestation, "scanJobId"),
         fingerprint,
         source: raw.source,
@@ -209,11 +338,11 @@ pub(crate) fn pull_request(config: &Config) -> Request {
 pub(crate) fn report_request(
     config: &Config,
     url: &str,
-    status: &str,
+    report: &Report,
     current: Option<&Current>,
 ) -> Request {
     let mut body = serde_json::Map::new();
-    body.insert("status".into(), Value::String(status.into()));
+    body.insert("status".into(), Value::String(report.status()));
     if let Some(c) = current {
         if !c.fingerprint.is_empty() {
             body.insert("fingerprint".into(), Value::String(c.fingerprint.clone()));
