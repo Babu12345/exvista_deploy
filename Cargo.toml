@@ -1,0 +1,32 @@
+[package]
+name = "exvista_deploy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Device-side client for ExVista model deployments, no_std + alloc: pull the model your device is cleared to run, verify it, stage it, report it. You supply the transport and the storage."
+license = "MIT"
+repository = "https://github.com/Babu12345/exvista_deploy"
+readme = "README.md"
+keywords = ["exvista", "edge", "embedded", "deployment", "no-std"]
+categories = ["api-bindings", "embedded", "no-std"]
+
+[dependencies]
+# Everything here builds without std. There is deliberately NO HTTP client and
+# NO filesystem code in this crate: you implement `Transport` and `Storage`
+# for your platform (see examples/std_device.rs for a std host).
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+# Streaming inflate for DEFLATE-compressed artifact entries (uploads); ExVista's
+# own artifacts are STORED and need no decompression at all.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+
+[dev-dependencies]
+# Tests build real zips to feed the streaming extractor; the std example uses
+# ureq + the filesystem. Neither is a dependency of the library.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+ureq = { version = "2", features = ["json"] }
+tempfile = "3"
+
+[[example]]
+name = "std_device"
